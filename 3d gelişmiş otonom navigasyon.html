@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Lunar Rover Mission</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(10, 20, 15, 0.85);
+            border: 2px solid #00ff00;
+            padding: 10px 15px;
+            border-radius: 8px;
+            color: #00ff00;
+            pointer-events: auto; /* Tıklamalar artık bu panele işleyebilir (Upgrade butonu için) */
+            box-shadow: 0 0 15px rgba(0, 255, 0, 0.2);
+            text-shadow: 0 0 5px rgba(0, 255, 0, 0.5);
+            min-width: 200px;
+            z-index: 10;
+        }
+        h2 { margin: 0 0 10px 0; font-size: 15px; text-align: center; border-bottom: 1px solid #00ff00; padding-bottom: 5px;}
+        .stat { margin: 4px 0; font-size: 12px; font-weight: bold; }
+        
+        /* RADAR SİSTEMİ EKLENTİSİ */
+        #radar-container {
+            margin-top: 10px;
+            border: 1px solid #00ff00;
+            width: 120px;
+            height: 120px;
+            margin-left: auto;
+            margin-right: auto;
+            position: relative;
+            background-color: #050505;
+        }
+        #radarCanvas { width: 100%; height: 100%; }
+        
+        #instructions {
+            position: absolute;
+            bottom: 30px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+            font-size: 16px;
+            letter-spacing: 1px;
+            z-index: 10;
+        }
+        .highlight { color: #fff; background: #333; padding: 2px 6px; border-radius: 4px;}
+        #controls-left {
+            position: absolute;
+            bottom: 30px;
+            left: 20px;
+            z-index: 20;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        #controls-left button {
+            background: rgba(10, 20, 15, 0.85);
+            border: 2px solid #00ff00;
+            color: #00ff00;
+            padding: 8px 15px;
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: bold;
+            font-size: 12px;
+            cursor: pointer;
+            border-radius: 5px;
+            transition: all 0.2s;
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.2);
+        }
+        #controls-left button:hover {
+            background: rgba(0, 255, 0, 0.3);
+            box-shadow: 0 0 15px rgba(0, 255, 0, 0.6);
+            transform: scale(1.05);
+        }
+    </style>
+    <!-- Three.js ve OrbitControls CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h2>[ ASİ TELEMETRY ]</h2>
+        <div class="stat" id="stat-status">DURUM: BEKLİYOR</div>
+        <div class="stat" id="stat-battery">BATARYA: 100 / 100</div>
+        <div class="stat" id="stat-science" style="color: #ffaa00;">TOPLANAN ÖRNEK: 0</div>
+        
+        <div id="radar-container">
+            <canvas id="radarCanvas" width="100" height="100"></canvas>
+        </div>
+
+        <h3 style="margin: 10px 0 5px 0; font-size: 12px; text-align: center; border-bottom: 1px dashed #00ff00;">SENSÖR VERİLERİ</h3>
+        <div class="stat" id="sensor-temp">SICAKLIK: -</div>
+        <div class="stat" id="sensor-rad">RADYASYON: -</div>
+        <div class="stat" id="sensor-inc">EĞİM: -</div>
+        <div class="stat" id="sensor-ir">KIZILÖTESİ: -</div>
+        <div class="stat" id="sensor-cam">KAMERA: -</div>
+        <div class="stat" id="sensor-comp" style="color:#ffaa00; font-size:11px;">SPEKTROMETRE: Analiz bekleniyor...</div>
+
+        <div class="stat" id="stat-log" style="margin-top: 10px; color: #aaa; font-size: 11px;">Sistem aktif. Hedef seçin.</div>
+    </div>
+
+    <div id="instructions">
+        Kamera: <span class="highlight">Sol/Sağ Tık + Sürükle</span> &nbsp;|&nbsp; Git: <span class="highlight">Yüzeye Sol Tıkla</span>
+    </div>
+
+    <div id="controls-left">
+        <button onclick="changeMap()">HARİTA DEĞİŞTİR</button>
+        <button onclick="startMission()">GÖREV BAŞLAT</button>
+        <button onclick="resetState()">SIFIRLA</button>
+    </div>
+
+    <script>
+        // --- OYUN DEĞİŞKENLERİ ---
+        const DEM_SIZE = 100;
+        const heights = new Float32Array((DEM_SIZE + 1) * (DEM_SIZE + 1));
+        
+        let scene, camera, renderer, controls;
+        let terrainMesh, roverGroup, targetMarker, pathLine;
+        
+        // Animasyon için referanslar
+        let wheelMeshes = [];
+        let robotArmJoint = null;
+        let robotArmHead = null;
+        let roverMastHead = null;
+        
+        let currentPath = [];
+        let isMoving = false;
+        
+        // GELİŞİM & VERİ SİSTEMİ DEĞİŞKENLERİ
+        let totalDistance = 0;
+        let maxBattery = 100.0;
+        let battery = 100.0;
+        let roverSpeed = 0.12;
+        let sciencePoints = 0; // Artık toplanan örnek sayısını tutacak
+
+        let isMissionActive = false;
+        let missionTargets = [];
+        let targetMeshes = [];
+
+        // Radar 
+        let radarCtx;
+        
+        // Sensör Güncelleme Zamanlayıcısı
+        let lastSensorUpdate = 0;
+        let displayTemp = -45;
+        let displayRad = 55;
+        let displayIR = 0.85;
+
+        window.onload = function() {
+            radarCtx = document.getElementById('radarCanvas').getContext('2d');
+            initScene();
+            createLunarEnvironment();
+            createRover();
+            setupInteraction();
+            animate();
+        };
+
+        function initScene() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050508);
+            scene.fog = new THREE.FogExp2(0x050508, 0.015);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 15, 25);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxPolarAngle = Math.PI / 2 - 0.05; 
+            controls.maxDistance = 60;
+            controls.minDistance = 5;
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function createLunarEnvironment() {
+            const ambientLight = new THREE.AmbientLight(0x222233, 0.3);
+            scene.add(ambientLight);
+
+            const sunLight = new THREE.DirectionalLight(0xffffee, 1.8);
+            sunLight.position.set(50, 20, -30); 
+            sunLight.castShadow = true;
+            sunLight.shadow.mapSize.width = 2048;
+            sunLight.shadow.mapSize.height = 2048;
+            sunLight.shadow.camera.near = 0.5;
+            sunLight.shadow.camera.far = 150;
+            sunLight.shadow.camera.left = -60;
+            sunLight.shadow.camera.right = 60;
+            sunLight.shadow.camera.top = 60;
+            sunLight.shadow.camera.bottom = -60;
+            scene.add(sunLight);
+
+            const starGeo = new THREE.BufferGeometry();
+            const starPos = [];
+            for(let i=0; i<1500; i++) {
+                starPos.push((Math.random()-0.5)*300, Math.random()*100 + 20, (Math.random()-0.5)*300);
+            }
+            starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+            const starMat = new THREE.PointsMaterial({color: 0xffffff, size: 0.3, transparent: true, opacity: 0.8});
+            scene.add(new THREE.Points(starGeo, starMat));
+
+            generateTerrain();
+        }
+
+        function drawRadarBackground() {
+            // Radar arka planına kraterleri çiz
+            let imgData = radarCtx.createImageData(100, 100);
+            for(let r=0; r<100; r++) {
+                for(let c=0; c<100; c++) {
+                    let h = heights[r * (DEM_SIZE + 1) + c];
+                    // Yüksekliği gri tona çevir
+                    let color = Math.max(0, Math.min(255, (h + 5) * 20)); 
+                    let idx = (r * 100 + c) * 4;
+                    imgData.data[idx] = 0;       // R
+                    imgData.data[idx+1] = color; // G (Yeşilimsi radar tarzı)
+                    imgData.data[idx+2] = 0;     // B
+                    imgData.data[idx+3] = 255;   // Alpha
+                }
+            }
+            radarCtx.putImageData(imgData, 0, 0);
+        }
+
+        function generateTerrain() {
+            if(terrainMesh) {
+                scene.remove(terrainMesh);
+                terrainMesh.geometry.dispose();
+                terrainMesh.material.dispose();
+            }
+
+            const terrainGeo = new THREE.PlaneGeometry(100, 100, DEM_SIZE, DEM_SIZE);
+            terrainGeo.rotateX(-Math.PI / 2); 
+
+            const posAttribute = terrainGeo.attributes.position;
+            const craters = [];
+            for(let i=0; i<20; i++) craters.push({cx: (Math.random()-0.5)*90, cz: (Math.random()-0.5)*90, r: 6+Math.random()*6, d: 1.5+Math.random()*2});
+            for(let i=0; i<50; i++) craters.push({cx: (Math.random()-0.5)*100, cz: (Math.random()-0.5)*100, r: 2+Math.random()*3, d: 0.5+Math.random()*1.5});
+
+            for ( let i = 0; i < posAttribute.count; i ++ ) {
+                let x = posAttribute.getX(i);
+                let z = posAttribute.getZ(i);
+                
+                let y = Math.sin(x*0.1)*Math.cos(z*0.1) * 0.8; 
+                y += Math.sin(x*0.04)*Math.cos(z*0.03) * 2.0;
+                
+                for(let c of craters) {
+                    let distSq = (x - c.cx)**2 + (z - c.cz)**2;
+                    let rSq = c.r**2;
+                    if (distSq < rSq * 0.7) {
+                        let dist = Math.sqrt(distSq);
+                        y -= c.d * (1 - Math.pow(dist/(c.r*0.85), 2)); 
+                    } else if (distSq < rSq * 1.5) {
+                        let dist = Math.sqrt(distSq);
+                        y += c.d * 0.3 * (1 - Math.pow(Math.abs(dist - c.r*1.1)/(c.r*0.3), 2)); 
+                    }
+                }
+                posAttribute.setY(i, y);
+                
+                let col = Math.round(x + 50);
+                let row = Math.round(z + 50);
+                heights[row * (DEM_SIZE + 1) + col] = y;
+            }
+            terrainGeo.computeVertexNormals(); 
+
+            const terrainMat = new THREE.MeshStandardMaterial({
+                color: 0x888888, 
+                roughness: 0.9, 
+                metalness: 0.0,
+            });
+            terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
+            terrainMesh.receiveShadow = true;
+            scene.add(terrainMesh);
+
+            drawRadarBackground(); // Arazı oluştuktan sonra radarı çiz
+        }
+
+        // Buton vs. işlevleri
+        function changeMap() {
+            resetState();
+            generateTerrain();
+            roverGroup.position.set(0, getExactHeight(0, 0), 0);
+            document.getElementById('stat-log').innerText = "Yeni harita oluşturuldu.";
+        }
+
+        function clearTargets() {
+            for(let mesh of targetMeshes) {
+                scene.remove(mesh);
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+            }
+            targetMeshes = [];
+            missionTargets = [];
+        }
+
+        function resetState() {
+            isMissionActive = false;
+            clearTargets();
+            currentPath = [];
+            if(pathLine) scene.remove(pathLine);
+            targetMarker.visible = false;
+            battery = maxBattery;
+            totalDistance = 0.0;
+            
+            roverGroup.position.set(0, getExactHeight(0, 0), 0);
+            
+            document.getElementById('stat-log').innerText = "Sistem Sıfırlandı. Serbest sürüş aktif.";
+            document.getElementById('stat-log').style.color = "#aaa";
+        }
+
+        function startMission() {
+            clearTargets();
+            isMissionActive = true;
+            battery = maxBattery; 
+            
+            for(let i=0; i<3; i++) {
+                let tx = (Math.random() - 0.5) * 80;
+                let tz = (Math.random() - 0.5) * 80;
+                let ty = getExactHeight(tx, tz);
+                missionTargets.push({x: tx, y: ty, z: tz});
+                
+                let geo = new THREE.OctahedronGeometry(0.8);
+                let mat = new THREE.MeshBasicMaterial({color: 0xffaa00, wireframe: true});
+                let mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(tx, ty + 1.0, tz);
+                scene.add(mesh);
+                targetMeshes.push(mesh);
+            }
+            
+            document.getElementById('stat-log').innerText = "Görev Başladı: 3 Örnek Toplanacak.";
+            document.getElementById('stat-log').style.color = "#00ff00";
+            planNextMissionTarget();
+        }
+
+        function planNextMissionTarget() {
+            if(missionTargets.length === 0) {
+                isMissionActive = false;
+                document.getElementById('stat-log').innerText = "GÖREV BAŞARIYLA TAMAMLANDI!";
+                document.getElementById('stat-log').style.color = "#00ff00";
+                return;
+            }
+            
+            let closestIdx = 0;
+            let minDist = Infinity;
+            let rPos = roverGroup.position;
+            for(let i=0; i<missionTargets.length; i++) {
+                let t = missionTargets[i];
+                let dist = Math.sqrt((t.x - rPos.x)**2 + (t.z - rPos.z)**2);
+                if(dist < minDist) {
+                    minDist = dist;
+                    closestIdx = i;
+                }
+            }
+            
+            let target = missionTargets[closestIdx];
+            let path = findPath(rPos, target);
+            
+            if(path.length > 0) {
+                currentPath = path;
+                targetMarker.position.set(target.x, getExactHeight(target.x, target.z) + 0.1, target.z);
+                targetMarker.visible = true;
+                drawPathLine(currentPath);
+            } else {
+                document.getElementById('stat-log').innerText = "Hedefe ulaşılamıyor. Başka hedefe yöneliniyor.";
+                missionTargets.splice(closestIdx, 1);
+                let unreachableMesh = targetMeshes.splice(closestIdx, 1)[0];
+                scene.remove(unreachableMesh);
+                planNextMissionTarget(); 
+            }
+        }
+
+        function getExactHeight(worldX, worldZ) {
+            let col = worldX + 50;
+            let row = worldZ + 50;
+            col = Math.max(0, Math.min(DEM_SIZE - 0.001, col));
+            row = Math.max(0, Math.min(DEM_SIZE - 0.001, row));
+            
+            let c0 = Math.floor(col); let c1 = c0 + 1;
+            let r0 = Math.floor(row); let r1 = r0 + 1;
+            
+            let h00 = heights[r0 * (DEM_SIZE + 1) + c0];
+            let h10 = heights[r0 * (DEM_SIZE + 1) + c1];
+            let h01 = heights[r1 * (DEM_SIZE + 1) + c0];
+            let h11 = heights[r1 * (DEM_SIZE + 1) + c1];
+            
+            let tx = col - c0; let ty = row - r0;
+            
+            let h0 = h00 * (1 - tx) + h10 * tx;
+            let h1 = h01 * (1 - tx) + h11 * tx;
+            return h0 * (1 - ty) + h1 * ty;
+        }
+
+        function createRover() {
+            roverGroup = new THREE.Group();
+            wheelMeshes = []; // Temizle
+            
+            // 1. Ana Gövde 
+            const bodyGeo = new THREE.BoxGeometry(1.4, 0.6, 2.0);
+            const bodyMat = new THREE.MeshStandardMaterial({color: 0x1a1a1a, roughness: 0.8, metalness: 0.2});
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 1.0;
+            body.castShadow = true;
+            roverGroup.add(body);
+
+            // 2. Alt Süspansiyon 
+            const suspMat = new THREE.MeshStandardMaterial({color: 0x295b8a, roughness: 0.7});
+            
+            const chassisGeo = new THREE.BoxGeometry(1.2, 0.2, 1.4);
+            const chassis = new THREE.Mesh(chassisGeo, suspMat);
+            chassis.position.y = 0.65;
+            chassis.castShadow = true;
+            roverGroup.add(chassis);
+
+            const legGeo = new THREE.BoxGeometry(0.15, 0.6, 0.2);
+            const wheelPos = [
+                [-0.8, 0.3, 1.0], [0.8, 0.3, 1.0],   
+                [-0.8, 0.3, 0.0], [0.8, 0.3, 0.0],   
+                [-0.8, 0.3, -1.0], [0.8, 0.3, -1.0]  
+            ];
+
+            for(let i = 0; i < wheelPos.length; i++) {
+                let p = wheelPos[i];
+                let leg = new THREE.Mesh(legGeo, suspMat);
+                leg.position.set(p[0] * 0.8, 0.5, p[2] * 0.7);
+                
+                if (p[2] > 0) leg.rotation.x = -0.4;
+                else if (p[2] < 0) leg.rotation.x = 0.4;
+                
+                leg.castShadow = true;
+                roverGroup.add(leg);
+            }
+
+            // 3. Tekerlekler (Jantlar dahil dönmesi için Group yapıldı)
+            const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.25, 12); // Jant teli efekti için segment azaltıldı
+            wheelGeo.rotateZ(Math.PI / 2);
+            const wheelMat = new THREE.MeshStandardMaterial({color: 0x7a1111, roughness: 0.8});
+            
+            const tireGeo = new THREE.TorusGeometry(0.35, 0.08, 16, 24);
+            tireGeo.rotateY(Math.PI / 2);
+            const tireMat = new THREE.MeshStandardMaterial({color: 0x111111, roughness: 0.9});
+
+            for(let p of wheelPos) {
+                let wheelAxis = new THREE.Group(); // Dönüş ekseni
+                wheelAxis.position.set(p[0], p[1], p[2]);
+
+                let w = new THREE.Mesh(wheelGeo, wheelMat);
+                w.castShadow = true;
+                
+                let tire = new THREE.Mesh(tireGeo, tireMat);
+                w.add(tire);
+                
+                wheelAxis.add(w);
+                roverGroup.add(wheelAxis);
+                wheelMeshes.push(wheelAxis); // Animasyon için kaydet
+            }
+
+            // 4. Robotik Kol (Yekpare Yeni Tasarım - Resimdeki gibi altın sarısı ve siyah)
+            const armGroup = new THREE.Group();
+            armGroup.position.set(0, 1.3, 0.5); 
+
+            // Malzemeler (Renkler ve Dokular)
+            const baseMatDark = new THREE.MeshStandardMaterial({color: 0x222222, roughness: 0.9, metalness: 0.1});
+            const armMatGold = new THREE.MeshStandardMaterial({color: 0xd4b473, roughness: 0.4, metalness: 0.6});
+            const jointMatRed = new THREE.MeshStandardMaterial({color: 0xaa0000, roughness: 0.3, metalness: 0.2});
+            const clawMatSilver = new THREE.MeshStandardMaterial({color: 0x888888, roughness: 0.5, metalness: 0.8});
+
+            // Siyah Alt Taban (Görseldeki gibi geniş ve tırtıklı hissi için sekizgen)
+            const baseGeo = new THREE.CylinderGeometry(0.35, 0.4, 0.15, 8);
+            const armBase = new THREE.Mesh(baseGeo, baseMatDark);
+            armBase.position.y = 0.075;
+            armBase.castShadow = true;
+            armGroup.add(armBase);
+
+            // Dönecek olan ana mafsal
+            robotArmJoint = new THREE.Group(); 
+            robotArmJoint.position.set(0, 0.15, 0);
+            armGroup.add(robotArmJoint);
+
+            // Omuz (Dönen parçanın tabanı)
+            const shoulderGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.15, 16);
+            const shoulder = new THREE.Mesh(shoulderGeo, armMatGold);
+            shoulder.position.y = 0.075;
+            shoulder.castShadow = true;
+            robotArmJoint.add(shoulder);
+
+            // Alt Kol (Biraz geriye eğik, yekpare yapı)
+            const lowerArmGeo = new THREE.BoxGeometry(0.22, 0.9, 0.22);
+            const lowerArm = new THREE.Mesh(lowerArmGeo, armMatGold);
+            lowerArm.position.set(0, 0.45, -0.15);
+            lowerArm.rotation.x = 0.3; // Geriye eğik
+            lowerArm.castShadow = true;
+            robotArmJoint.add(lowerArm);
+
+            // Dirsek ve Üst Kol Grubu (Yukarı-aşağı animasyonu için Pivot Noktası)
+            robotArmHead = new THREE.Group(); 
+            robotArmHead.position.set(0, 0.88, -0.28); // Alt kolun tam ucuna denk gelecek koordinat
+            robotArmJoint.add(robotArmHead);
+
+            // Dirsek Eklemi (Görseldeki gibi Altın Dış çember, Kırmızı İç merkez)
+            const elbowOuterGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.24, 16);
+            elbowOuterGeo.rotateZ(Math.PI / 2);
+            const elbowOuter = new THREE.Mesh(elbowOuterGeo, armMatGold);
+            elbowOuter.castShadow = true;
+            robotArmHead.add(elbowOuter);
+
+            const elbowInnerGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.26, 16);
+            elbowInnerGeo.rotateZ(Math.PI / 2);
+            const elbowInner = new THREE.Mesh(elbowInnerGeo, jointMatRed);
+            elbowInner.castShadow = true;
+            robotArmHead.add(elbowInner);
+
+            // Üst Kol (Öne doğru uzanan yatay yekpare parça)
+            const upperArmGeo = new THREE.BoxGeometry(0.18, 0.7, 0.18);
+            const upperArm = new THREE.Mesh(upperArmGeo, armMatGold);
+            upperArm.position.set(0, 0, 0.35); // Dirsekten ileri doğru
+            upperArm.rotation.x = Math.PI / 2;
+            upperArm.castShadow = true;
+            robotArmHead.add(upperArm);
+
+            // Bilek Eklemi
+            const wristGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.2, 16);
+            wristGeo.rotateZ(Math.PI / 2);
+            const wrist = new THREE.Mesh(wristGeo, armMatGold);
+            wrist.position.set(0, 0, 0.7);
+            wrist.castShadow = true;
+            robotArmHead.add(wrist);
+
+            // Ön Kol (Bilekten aşağı bakan parça)
+            const forearmGeo = new THREE.BoxGeometry(0.12, 0.4, 0.12);
+            const forearm = new THREE.Mesh(forearmGeo, armMatGold);
+            forearm.position.set(0, -0.2, 0.7);
+            forearm.castShadow = true;
+            robotArmHead.add(forearm);
+
+            // Tutucu Tabanı (Gripper Base)
+            const clawBaseGeo = new THREE.BoxGeometry(0.2, 0.05, 0.15);
+            const clawBase = new THREE.Mesh(clawBaseGeo, clawMatSilver);
+            clawBase.position.set(0, -0.425, 0.7);
+            clawBase.castShadow = true;
+            robotArmHead.add(clawBase);
+
+            // Tutucu Sol Parmak
+            const fingerGeo = new THREE.BoxGeometry(0.04, 0.15, 0.08);
+            const fingerLeft = new THREE.Mesh(fingerGeo, clawMatSilver);
+            fingerLeft.position.set(-0.08, -0.5, 0.7);
+            fingerLeft.castShadow = true;
+            robotArmHead.add(fingerLeft);
+
+            // Tutucu Sağ Parmak
+            const fingerRight = new THREE.Mesh(fingerGeo, clawMatSilver);
+            fingerRight.position.set(0.08, -0.5, 0.7);
+            fingerRight.castShadow = true;
+            robotArmHead.add(fingerRight);
+            
+            // Parmak uçlarına ufak kırmızı detaylar (Sensör / Lazer hissi için)
+            const sensorGeo = new THREE.BoxGeometry(0.02, 0.02, 0.02);
+            const fingerSensorL = new THREE.Mesh(sensorGeo, jointMatRed);
+            fingerSensorL.position.set(-0.06, -0.56, 0.72);
+            robotArmHead.add(fingerSensorL);
+            const fingerSensorR = new THREE.Mesh(sensorGeo, jointMatRed);
+            fingerSensorR.position.set(0.06, -0.56, 0.72);
+            robotArmHead.add(fingerSensorR);
+
+            roverGroup.add(armGroup);
+
+            // 5. Güneş Paneli
+            const panelGeo = new THREE.BoxGeometry(1.2, 0.05, 1.0);
+            const panelMat = new THREE.MeshStandardMaterial({color: 0x112255, roughness: 0.2, metalness: 0.8});
+            const panel = new THREE.Mesh(panelGeo, panelMat);
+            panel.position.set(0, 1.32, -0.4); 
+            panel.castShadow = true;
+            roverGroup.add(panel);
+
+            // 6. Kamera Direği (Mast) ve Sensör Kafası
+            const mastGroup = new THREE.Group();
+            mastGroup.position.set(-0.5, 1.3, 0.85); // Gövdenin ön-sol köşesine alındı (Kol ile çarpışmaması için)
+
+            // Direk (Mast)
+            const mastGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.6, 16);
+            const mastMat = new THREE.MeshStandardMaterial({color: 0x888888, roughness: 0.6});
+            const mast = new THREE.Mesh(mastGeo, mastMat);
+            mast.position.y = 0.3;
+            mast.castShadow = true;
+            mastGroup.add(mast);
+
+            // Hareketli Kafa Grubu
+            roverMastHead = new THREE.Group();
+            roverMastHead.position.set(0, 0.65, 0);
+            mastGroup.add(roverMastHead);
+
+            // Kamera Kafası (Head - Gövde)
+            const headGeo = new THREE.BoxGeometry(0.4, 0.2, 0.2);
+            const headMat = new THREE.MeshStandardMaterial({color: 0xdddddd, roughness: 0.3});
+            const camHead = new THREE.Mesh(headGeo, headMat);
+            camHead.castShadow = true;
+            roverMastHead.add(camHead);
+
+            // Lensler (Stereo Kameralar ve IR)
+            const lensGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.06, 16);
+            lensGeo.rotateX(Math.PI / 2);
+            const lensMat = new THREE.MeshStandardMaterial({color: 0x111111, roughness: 0.1, metalness: 0.9}); 
+            const irLensMat = new THREE.MeshStandardMaterial({color: 0x550000, roughness: 0.2, metalness: 0.5, emissive: 0x220000}); 
+
+            // Sol Kamera
+            const camLeft = new THREE.Mesh(lensGeo, lensMat);
+            camLeft.position.set(-0.12, 0, 0.1);
+            roverMastHead.add(camLeft);
+
+            // Sağ Kamera
+            const camRight = new THREE.Mesh(lensGeo, lensMat);
+            camRight.position.set(0.12, 0, 0.1);
+            roverMastHead.add(camRight);
+
+            // Orta Kızılötesi (IR) Sensör
+            const irLensGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.07, 16);
+            irLensGeo.rotateX(Math.PI / 2);
+            const camIR = new THREE.Mesh(irLensGeo, irLensMat);
+            camIR.position.set(0, 0.04, 0.1);
+            roverMastHead.add(camIR);
+
+            roverGroup.add(mastGroup);
+
+            roverGroup.position.set(0, getExactHeight(0, 0), 0);
+            scene.add(roverGroup);
+
+            const targetGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.1, 16);
+            const targetMat = new THREE.MeshBasicMaterial({color: 0x00ff00, transparent: true, opacity: 0.6});
+            targetMarker = new THREE.Mesh(targetGeo, targetMat);
+            targetMarker.visible = false;
+            scene.add(targetMarker);
+        }
+
+        function setupInteraction() {
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+
+            window.addEventListener('pointerdown', (event) => {
+                if(event.target.tagName !== 'CANVAS') return; 
+                
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                
+                const intersects = raycaster.intersectObject(terrainMesh);
+                if(intersects.length > 0) {
+                    if(isMissionActive) {
+                        isMissionActive = false;
+                        document.getElementById('stat-log').innerText = "Görev İptal Edildi. Manuel Kontrol.";
+                        document.getElementById('stat-log').style.color = "#aaa";
+                    }
+
+                    let point = intersects[0].point;
+                    document.getElementById('stat-log').innerText = "Rota Hesaplanıyor...";
+                    
+                    setTimeout(() => {
+                        let path = findPath(roverGroup.position, point);
+                        if(path.length > 0) {
+                            currentPath = path;
+                            targetMarker.position.set(point.x, getExactHeight(point.x, point.z) + 0.1, point.z);
+                            targetMarker.visible = true;
+                            drawPathLine(currentPath);
+                            document.getElementById('stat-log').innerText = "Rota Onaylandı. İlerliyor.";
+                        } else {
+                            document.getElementById('stat-log').innerText = "HATA: Krater çok dik! Rota bulunamadı.";
+                            document.getElementById('stat-log').style.color = "red";
+                            setTimeout(()=> document.getElementById('stat-log').style.color = "#aaa", 2000);
+                        }
+                    }, 10); 
+                }
+            });
+        }
+
+        function drawPathLine(path) {
+            if(pathLine) scene.remove(pathLine);
+            if(path.length === 0) return;
+            
+            const points = [new THREE.Vector3(roverGroup.position.x, roverGroup.position.y + 0.5, roverGroup.position.z)];
+            for(let p of path) points.push(new THREE.Vector3(p.x, getExactHeight(p.x, p.z) + 0.5, p.z));
+            
+            const geo = new THREE.BufferGeometry().setFromPoints(points);
+            const mat = new THREE.LineBasicMaterial({color: 0x00ff00, linewidth: 2});
+            pathLine = new THREE.Line(geo, mat);
+            scene.add(pathLine);
+        }
+
+        function findPath(startPos, goalPos) {
+            let sX = Math.round(startPos.x + 50); let sZ = Math.round(startPos.z + 50);
+            let gX = Math.round(goalPos.x + 50); let gZ = Math.round(goalPos.z + 50);
+            
+            sX = Math.max(0, Math.min(DEM_SIZE, sX)); sZ = Math.max(0, Math.min(DEM_SIZE, sZ));
+            gX = Math.max(0, Math.min(DEM_SIZE, gX)); gZ = Math.max(0, Math.min(DEM_SIZE, gZ));
+
+            let openSet = [{x: sX, z: sZ, f: 0, g: 0}];
+            let cameFrom = new Map();
+            let gScore = new Map();
+            const toKey = (x, z) => `${x},${z}`;
+            
+            gScore.set(toKey(sX, sZ), 0);
+            let iters = 0;
+            
+            while(openSet.length > 0 && iters < 8000) {
+                iters++;
+                openSet.sort((a,b) => a.f - b.f);
+                let current = openSet.shift();
+                
+                if (current.x === gX && current.z === gZ) {
+                    let path = [];
+                    let currKey = toKey(current.x, current.z);
+                    while(cameFrom.has(currKey)) {
+                        let prev = cameFrom.get(currKey);
+                        path.push({x: current.x - 50, z: current.z - 50});
+                        current = prev;
+                        currKey = toKey(current.x, current.z);
+                    }
+                    return path.reverse();
+                }
+                
+                const dirs = [[0,1],[1,0],[0,-1],[-1,0],[1,1],[-1,-1],[1,-1],[-1,1]];
+                for(let d of dirs) {
+                    let nx = current.x + d[0]; let nz = current.z + d[1];
+                    if(nx < 0 || nx > DEM_SIZE || nz < 0 || nz > DEM_SIZE) continue;
+                    
+                    let hCurr = heights[current.z * (DEM_SIZE + 1) + current.x];
+                    let hNext = heights[nz * (DEM_SIZE + 1) + nx];
+                    let hDiff = Math.abs(hNext - hCurr);
+                    
+                    if(hDiff > 0.9) continue; 
+                    
+                    let moveCost = (d[0] !== 0 && d[1] !== 0) ? 1.414 : 1.0;
+                    let penalty = hDiff * 6.0; 
+                    
+                    let tentative_g = gScore.get(toKey(current.x, current.z)) + moveCost + penalty;
+                    let neighborKey = toKey(nx, nz);
+                    
+                    if(!gScore.has(neighborKey) || tentative_g < gScore.get(neighborKey)) {
+                        cameFrom.set(neighborKey, {x: current.x, z: current.z});
+                        gScore.set(neighborKey, tentative_g);
+                        let h = Math.sqrt((nx-gX)**2 + (nz-gZ)**2); 
+                        openSet.push({x: nx, z: nz, f: tentative_g + h * 1.1, g: tentative_g});
+                    }
+                }
+            }
+            return [];
+        }
+
+        // --- OYUN DÖNGÜSÜ ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Hedefleri döndür
+            for(let mesh of targetMeshes) {
+                mesh.rotation.y += 0.03;
+                mesh.rotation.x += 0.02;
+            }
+
+            // Görevdeysek örnek toplama kontrolü
+            if (isMissionActive) {
+                for(let i=0; i<missionTargets.length; i++) {
+                    let t = missionTargets[i];
+                    let distToTarget = Math.sqrt((t.x - roverGroup.position.x)**2 + (t.z - roverGroup.position.z)**2);
+                    if (distToTarget < 1.8) { 
+                        missionTargets.splice(i, 1);
+                        let mesh = targetMeshes.splice(i, 1)[0];
+                        scene.remove(mesh);
+                        
+                        // ÖRNEK TOPLANDI -> SİSTEM GÜNCELLEMESİ
+                        sciencePoints += 1;
+                        document.getElementById('stat-log').innerText = "Örnek Toplandı! Yüzey analizi yapılıyor...";
+                        
+                        // Spektrometre analizi simulasyonu (NASA Ay Güney Kutbu verilerine uygun - Anortozit Yapı)
+                        let compSiO2 = (Math.random() * 8 + 40).toFixed(1); // %40-48 Silika (SiO2)
+                        let compAl2O3 = (Math.random() * 8 + 20).toFixed(1); // %20-28 Alüminyum Oksit (Al2O3)
+                        let compCaO = (Math.random() * 6 + 10).toFixed(1); // %10-16 Kalsiyum Oksit (CaO)
+                        let remainder = (100 - parseFloat(compSiO2) - parseFloat(compAl2O3) - parseFloat(compCaO)).toFixed(1);
+                        document.getElementById('sensor-comp').innerText = `SPEKTROMETRE: %${compSiO2} SiO2, %${compAl2O3} Al2O3, %${compCaO} CaO, %${remainder} Diğer`;
+                        document.getElementById('sensor-comp').style.color = "#00ff00";
+                        setTimeout(() => document.getElementById('sensor-comp').style.color = "#ffaa00", 2000);
+
+                        currentPath = []; 
+                        targetMarker.visible = false;
+                        if(pathLine) scene.remove(pathLine);
+                        
+                        setTimeout(planNextMissionTarget, 500); 
+                        break;
+                    }
+                }
+            }
+
+            if(currentPath.length > 0 && battery > 0) {
+                isMoving = true;
+                let target = currentPath[0];
+                let dx = target.x - roverGroup.position.x;
+                let dz = target.z - roverGroup.position.z;
+                let dist = Math.sqrt(dx*dx + dz*dz);
+                
+                if(dist < 0.2) {
+                    currentPath.shift();
+                    if(currentPath.length === 0) {
+                        targetMarker.visible = false;
+                        if(pathLine) scene.remove(pathLine);
+                        document.getElementById('stat-log').innerText = "Hedefe Ulaşıldı.";
+                    }
+                } else {
+                    let moveDist = Math.min(roverSpeed, dist);
+                    roverGroup.position.x += (dx / dist) * moveDist;
+                    roverGroup.position.z += (dz / dist) * moveDist;
+                    totalDistance += moveDist;
+                    battery -= 0.03; 
+                    
+                    // TEKERLEK ANİMASYONU
+                    for(let w of wheelMeshes) {
+                        w.rotation.x -= moveDist / 0.35; // Hıza ve tekerlek yarıçapına göre dönme
+                    }
+                }
+                
+                let exactY = getExactHeight(roverGroup.position.x, roverGroup.position.z);
+                roverGroup.position.y = exactY;
+                
+                if(currentPath.length > 0) {
+                    let nextP = currentPath[0];
+                    let nextY = getExactHeight(nextP.x, nextP.z);
+                    roverGroup.lookAt(new THREE.Vector3(nextP.x, nextY, nextP.z));
+                }
+
+                // Robotik Kol Arama Animasyonu (Hareket Ederken)
+                if(robotArmJoint) robotArmJoint.rotation.y = Math.sin(Date.now() * 0.003) * 0.5;
+                if(robotArmHead) robotArmHead.rotation.x = Math.sin(Date.now() * 0.005) * 0.3;
+
+                // Kamera Kafası Etrafı Tarama Animasyonu
+                if(roverMastHead) roverMastHead.rotation.y = Math.sin(Date.now() * 0.002) * 0.8;
+
+            } else {
+                isMoving = false;
+                if(battery < maxBattery) battery += 0.01; 
+                
+                // Dururken kolu yavaşça eski haline getir
+                if(robotArmJoint) robotArmJoint.rotation.y *= 0.95;
+                if(robotArmHead) robotArmHead.rotation.x *= 0.95;
+                
+                // Dururken kamera kafası hafifçe hareket etsin (çevreyi izliyor)
+                if(roverMastHead) roverMastHead.rotation.y = Math.sin(Date.now() * 0.0005) * 0.3;
+            }
+
+            // Kamerayı rover'a bağla
+            controls.target.copy(roverGroup.position);
+            controls.update();
+
+            updateUI();
+            renderer.render(scene, camera);
+        }
+
+        function updateUI() {
+            // Statü Yazıları
+            document.getElementById('stat-battery').innerText = `BATARYA: ${Math.max(0, battery).toFixed(1)} / ${maxBattery.toFixed(0)}`;
+            document.getElementById('stat-science').innerText = `TOPLANAN ÖRNEK: ${sciencePoints}`;
+            
+            // Sensör Hesaplamaları
+            if(roverGroup) {
+                let rPos = roverGroup.position;
+                
+                // 1. Eğim Hesaplama (Anlık güncellenir)
+                let h1 = getExactHeight(rPos.x + 0.1, rPos.z);
+                let h2 = getExactHeight(rPos.x - 0.1, rPos.z);
+                let dx = (h1 - h2) / 0.2;
+                let hz1 = getExactHeight(rPos.x, rPos.z + 0.1);
+                let hz2 = getExactHeight(rPos.x, rPos.z - 0.1);
+                let dz = (hz1 - hz2) / 0.2;
+                let slope = Math.atan(Math.sqrt(dx*dx + dz*dz)) * (180 / Math.PI);
+                document.getElementById('sensor-inc').innerText = `EĞİM: ${slope.toFixed(1)}°`;
+
+                // Sensör verilerini saniyede 60 kez değil, yarım saniyede bir (500ms) güncelle
+                let now = Date.now();
+                if (now - lastSensorUpdate > 500) {
+                    // 2. Sıcaklık
+                    let baseTemp = -45;
+                    if (rPos.y < -0.8) baseTemp = -210; 
+                    else if (rPos.y > 0.5) baseTemp = -10; 
+                    displayTemp = baseTemp + (Math.random() * 4 - 2); 
+
+                    // 3. Radyasyon
+                    let baseRad = 55;
+                    if (rPos.y > 0.8) baseRad += 15; 
+                    displayRad = baseRad + (Math.random() * 10);
+                    
+                    // 4. Kızılötesi (IR)
+                    let baseIr = 0.85;
+                    if (rPos.y < -1.0) baseIr -= 0.15; 
+                    displayIR = baseIr + (Math.random() * 0.05);
+
+                    lastSensorUpdate = now;
+                }
+
+                // UI'a yazdır
+                document.getElementById('sensor-temp').innerText = `SICAKLIK: ${displayTemp.toFixed(1)} °C`;
+                document.getElementById('sensor-rad').innerText = `RADYASYON: ${displayRad.toFixed(1)} µSv/h`;
+                document.getElementById('sensor-ir').innerText = `KIZILÖTESİ: ${displayIR.toFixed(2)} ε (Yansıma)`;
+
+                // 5. Kamera Sistemi (Durum/Görüş)
+                let camStatus = "Geniş Açı (Bekleme)";
+                if (isMoving) camStatus = "Navigasyon (Aktif Tarama)";
+                if (isMissionActive) {
+                    let closestDist = Infinity;
+                    for(let t of missionTargets) {
+                        let d = Math.sqrt((t.x - rPos.x)**2 + (t.z - rPos.z)**2);
+                        if(d < closestDist) closestDist = d;
+                    }
+                    if(closestDist < 10) camStatus = "Hedef Yakında (Odaklanıldı)";
+                }
+                document.getElementById('sensor-cam').innerText = `KAMERA: ${camStatus}`;
+            }
+
+            if(battery <= 0) {
+                document.getElementById('stat-status').innerText = "DURUM: GÜÇ TÜKENDİ!";
+                document.getElementById('stat-status').style.color = "red";
+            } else if(isMoving) {
+                document.getElementById('stat-status').innerText = "DURUM: HAREKET HALİNDE";
+                document.getElementById('stat-status').style.color = "cyan";
+            } else {
+                document.getElementById('stat-status').innerText = "DURUM: ŞARJ OLUYOR / BEKLİYOR";
+                document.getElementById('stat-status').style.color = "#00ff00";
+            }
+
+            // RADAR ÇİZİMİ
+            drawRadarBackground(); // Arka planı yenile (eski pozisyonları silmek için)
+            
+            // Radarda Hedefleri Çiz
+            radarCtx.fillStyle = '#ffaa00';
+            for(let t of missionTargets) {
+                let rx = t.x + 50;
+                let rz = t.z + 50;
+                radarCtx.beginPath();
+                radarCtx.arc(rx, rz, 2, 0, 2 * Math.PI);
+                radarCtx.fill();
+            }
+
+            // Radarda Aracı Çiz
+            radarCtx.fillStyle = '#ff0000';
+            let rox = roverGroup.position.x + 50;
+            let roz = roverGroup.position.z + 50;
+            radarCtx.beginPath();
+            radarCtx.arc(rox, roz, 3, 0, 2 * Math.PI);
+            radarCtx.fill();
+        }
+    </script>
+</body>
+</html>
